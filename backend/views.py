@@ -316,7 +316,6 @@ def get_all_products():
         }), 500
 
 
-# 卖家更新自己的商品列表API[POST]   /api/sell_order/updateProduct
 @main.route('/api/sell_order/updateProduct', methods=['POST'])
 @token_required
 def update_products(current_user):
@@ -362,6 +361,22 @@ def update_products(current_user):
                     "message": f"Product not found or not owned by you (proid: {product_data['proid']})"
                 }), 404
 
+            # 检查商品是否存在于未完成的订单中
+            pending_order_items = OrderItem.query.join(Order).filter(
+                OrderItem.proid == product_data['proid'],
+                Order.status != 'delivered'  # 检查非已完成订单
+            ).first()
+
+            if pending_order_items:
+                return jsonify({
+                    "code": 0,
+                    "message": f"Cannot update product: {product.name} (proid: {product_data['proid']}) "
+                              f"because it exists in pending orders"
+                }), 400
+
+            # 记录旧价格用于更新购物车
+            old_price = product.price
+
             # 更新商品信息
             if 'name' in product_data:
                 product.name = product_data['name']
@@ -381,6 +396,15 @@ def update_products(current_user):
                     }), 404
                 product.catid = product_data['catid']
 
+            # 如果价格有变化，更新购物车中的价格信息
+            if 'price' in product_data and old_price != product_data['price']:
+                # 更新所有包含该商品的购物车项的价格
+                cart_items = CartItem.query.filter_by(proid=product_data['proid']).all()
+                for item in cart_items:
+                    # 这里可以根据业务需求决定是否更新购物车中的价格
+                    # 或者只是记录价格变化，让用户确认
+                    item.price = product_data['price']  # 假设直接更新价格
+
         # 提交数据库更改
         db.session.commit()
 
@@ -398,7 +422,6 @@ def update_products(current_user):
             "code": 0,
             "message": str(e)
         }), 400
-
 
 # 卖家增加自己的商品API[POST]   /api/sell_order/addProduct
 @main.route('/api/sell_order/addProduct', methods=['POST'])
@@ -511,26 +534,47 @@ def delete_product(current_user):
                 "message": f"No permission to delete product: {product.name} (proid: {data['proid']})"
             }), 403
 
-        # 4. 记录待删除的商品名称（提交前获取）
+        # 4. 检查商品是否存在于未完成的订单中
+        pending_order_items = OrderItem.query.join(Order).filter(
+            OrderItem.proid == data['proid'],
+            Order.status != 'delivered'  # 检查非已完成订单
+        ).first()
+
+        if pending_order_items:
+            return jsonify({
+                "code": 0,
+                "message": f"Cannot delete product: {product.name} (proid: {data['proid']}) because it exists in pending orders"
+            }), 400
+
+        # 5. 记录待删除的商品名称（提交前获取）
         deleted_product_name = product.name
 
-        # 5. 执行删除
-        db.session.delete(product)
+        # 6. 删除相关数据（使用事务保证原子性）
+        with db.session.begin_nested():
+            # 删除购物车项
+            CartItem.query.filter_by(proid=data['proid']).delete()
+
+            # 删除已完成订单中的订单项（可选，根据业务需求）
+            # OrderItem.query.filter_by(proid=data['proid']).delete()
+
+            # 删除商品
+            db.session.delete(product)
+
         db.session.commit()
 
-        # 6. 返回成功响应（包含商品名称）
+        # 7. 返回成功响应
         return jsonify({
             "code": 200,
-            "message": "Product deleted successfully",
+            "message": "Product and related items deleted successfully",
             "data": {
                 "deleted_proid": data['proid'],
-                "deleted_name": deleted_product_name  # 新增返回字段
+                "deleted_name": deleted_product_name
             }
         }), 200
 
     except Exception as e:
-        print(e)
         db.session.rollback()
+        print(e)
         return jsonify({
             "code": 0,
             "message": f"Deletion failed: {str(e)}"
